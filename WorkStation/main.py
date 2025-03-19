@@ -1,15 +1,16 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 import numpy as np
 import pandas as pd
 from transformers import AutoTokenizer, AutoConfig, BertForTokenClassification, Trainer, TrainingArguments
 
-from WorkStation.NERDataset import NERDataset
-from WorkStation.NER_Labeling import labeling, id2label, label2id
-from WorkStation.Result_Calculation import compute_metrics, compute_macro_metrics_per_document, \
-    exact_matching_accuracy_per_document, save_all_evaluation_excel, save_confusion_matrix_images, \
-    print_text_and_entity_predictions
+from NERDataset import NERDataset
+from NER_Labeling import labeling, id2label, label2id
+from Result_Calculation import compute_metrics, compute_macro_metrics_per_document, exact_matching_accuracy_per_document, save_all_evaluation_excel, save_confusion_matrix_images, print_text_and_entity_predictions
 
-df_train = pd.read_csv(r"C:\junha\Datasets\WikiBio_wikipedia-biography-dataset\wikibio_no_date_train.csv")
-df_test = pd.read_csv(r"C:\junha\Datasets\WikiBio_wikipedia-biography-dataset\wikibio_no_date_val.csv")
+df_train = pd.read_csv(r"/home/junha/WikiBIO/Dataset/train.csv")
+df_test = pd.read_csv(r"/home/junha/WikiBIO/Dataset/val.csv")
 
 train_data = df_train.to_dict(orient='records')
 test_data = df_test.to_dict(orient='records')

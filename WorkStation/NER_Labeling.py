@@ -1,10 +1,16 @@
 import re
+import string
+
 
 
 label2id = {
     "O": 0,
     "B-NAME": 1, "I-NAME": 2,
-    "B-OCCUPATION": 3, "I-OCCUPATION": 4
+    "B-BIRTHDATE": 3, "I-BIRTHDATE": 4,
+    "B-DEATHDATE": 5, "I-DEATHDATE": 6,
+    "B-OCCUPATION": 7, "I-OCCUPATION": 8,
+
+
 }
 id2label = {v: k for k, v in label2id.items()}
 
@@ -22,7 +28,9 @@ def create_bio_labels_with_offsets(text, tokens, offsets, record):
 
     entity_fields = {
         "NAME": "name",
-        "OCCUPATION": "occupation",
+        "BIRTHDATE": "birth_date",
+        "DEATHDATE": "death_date",
+        "OCCUPATION": "occupation"
     }
 
     for tag, field in entity_fields.items():
@@ -53,6 +61,35 @@ def create_bio_labels_with_offsets(text, tokens, offsets, record):
                 break
     return labels
 
+def extract_entities(labels, tokens, tag):
+    entities = []
+    current_entity_tokens = []
+    for i, (label, token) in enumerate(zip(labels, tokens)):
+        token_clean = token[2:] if token.startswith("##") else token
+        if label == f"B-{tag}":
+            if current_entity_tokens:
+                entities.append("".join(current_entity_tokens))
+            current_entity_tokens = [token_clean]
+        elif label == f"I-{tag}" and current_entity_tokens:
+            # 서브워드인 경우 앞 토큰과 붙여서
+            if token.startswith("##"):
+                current_entity_tokens.append(token_clean)
+            else:
+                if token in string.punctuation:
+                    current_entity_tokens.append(token_clean)
+                else:
+                    if current_entity_tokens and current_entity_tokens[-1][-1] in string.punctuation:
+                        current_entity_tokens.append(token_clean)
+                    else:
+                        current_entity_tokens.append(" " + token_clean)
+        else:
+            if current_entity_tokens:
+                entities.append("".join(current_entity_tokens))
+                current_entity_tokens = []
+    if current_entity_tokens:
+        entities.append("".join(current_entity_tokens))
+    return " ".join(entities)
+
 
 def labeling(data_list, tokenizer):
     all_input_ids = []
@@ -60,7 +97,7 @@ def labeling(data_list, tokenizer):
     all_label_ids = []
     sentences_iob = []
     for record in data_list:
-        text = record.get("doc", "")
+        text =  str(record.get("doc", ""))
         encoding = tokenizer(
             text,
             return_tensors="pt",

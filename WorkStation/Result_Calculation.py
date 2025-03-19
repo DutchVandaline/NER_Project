@@ -5,6 +5,8 @@ from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from WorkStation.NER_Labeling import id2label, extract_entities
+
 
 def get_str(record, field):
     val = record.get(field)
@@ -32,8 +34,7 @@ def compute_metrics(p):
 
 def compute_macro_metrics_per_document(test_input_ids, test_label_ids, predictions, attention_masks, tokenizer,
                                        id2label):
-    # 새 엔티티 종류 (O 외에 7개; FAMILY 제거)
-    entity_labels = ["O", "NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
+    entity_labels = ["O", "NAME", "BIRTHDATE", "DEATHDATE", "OCCUPATION"]
     metrics_per_entity = {label: {"precisions": [], "recalls": [], "f1s": []} for label in entity_labels}
 
     def map_bio_to_entity(label):
@@ -83,7 +84,7 @@ def compute_macro_metrics_per_document(test_input_ids, test_label_ids, predictio
 
 def exact_matching_accuracy_per_document(test_data, test_input_ids, predictions, tokenizer, id2label):
     # 엔티티 종류와 record 필드 이름 변경 (familyFriendly 제거)
-    entity_types = ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
+    entity_types = ["NAME", "BIRTHDATE", "DEATHDATE", "OCCUPATION"]
     overall_metrics = {}
     for entity in entity_types:
         overall_metrics[entity] = {"correct": 0, "total": len(test_data), "accuracy": 0.0}
@@ -91,7 +92,7 @@ def exact_matching_accuracy_per_document(test_data, test_input_ids, predictions,
         tokens = tokenizer.convert_ids_to_tokens(test_input_ids[idx])
         pred_labels = [id2label[p] for p in predictions[idx][:len(tokens)]]
         for entity, field in zip(entity_types,
-                                 ["name", "eatType", "food", "priceRange", "customer rating", "area", "near"]):
+                                 ["name", "birth_date", "death_date", "occupation"]):
             true_entity = get_str(record, field)
             pred_entity = extract_entities(pred_labels, tokens, entity).strip()
             if true_entity == pred_entity:
@@ -110,12 +111,9 @@ def print_text_and_entity_predictions(test_data, test_input_ids, predictions, to
         pred_labels = [id2label[p] for p in predictions[idx][:len(tokens)]]
         true_entities = {
             "NAME": get_str(record, "name"),
-            "EATTYPE": get_str(record, "eatType"),
-            "FOOD": get_str(record, "food"),
-            "PRICERANGE": get_str(record, "priceRange"),
-            "RATING": get_str(record, "customer rating"),
-            "AREA": get_str(record, "area"),
-            "NEAR": get_str(record, "near"),
+            "BIRTHDATE": get_str(record, "birth_date"),
+            "DEATHDATE": get_str(record, "death_date"),
+            "OCCUPATION": get_str(record, "occupation"),
         }
         pred_entities = {tag: extract_entities(pred_labels, tokens, tag).strip() for tag in true_entities}
         text = get_str(record, "질문수정")
@@ -145,20 +143,14 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
         bio_str = "\n".join(bio_pairs)
 
         true_name = get_str(record, "name")
-        true_eattype = get_str(record, "eatType")
-        true_food = get_str(record, "food")
-        true_pricerange = get_str(record, "priceRange")
-        true_rating = get_str(record, "customer rating")
-        true_area = get_str(record, "area")
-        true_near = get_str(record, "near")
+        true_birthdate = get_str(record, "birth_date")
+        true_deathdate = get_str(record, "death_date")
+        true_occupation = get_str(record, "occupation")
 
         pred_name = extract_entities(pred_token_labels, tokens, "NAME").strip()
-        pred_eattype = extract_entities(pred_token_labels, tokens, "EATTYPE").strip()
-        pred_food = extract_entities(pred_token_labels, tokens, "FOOD").strip()
-        pred_pricerange = extract_entities(pred_token_labels, tokens, "PRICERANGE").strip()
-        pred_rating = extract_entities(pred_token_labels, tokens, "RATING").strip()
-        pred_area = extract_entities(pred_token_labels, tokens, "AREA").strip()
-        pred_near = extract_entities(pred_token_labels, tokens, "NEAR").strip()
+        pred_birthdate = extract_entities(pred_token_labels, tokens, "BIRTHDATE").strip()
+        pred_deathdate = extract_entities(pred_token_labels, tokens, "DEATHDATE").strip()
+        pred_occupation = extract_entities(pred_token_labels, tokens, "OCCUPATION").strip()
 
         if tokens[0] == "[CLS]" and tokens[-1] == "[SEP]":
             t_tokens = tokens[1:-1]
@@ -174,12 +166,9 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
             "Text": text,
             "BIO Labeling": bio_str,
             "True NAME / Predicted NAME": f"True: {true_name} | Predicted: {pred_name}",
-            "True EATTYPE / Predicted EATTYPE": f"True: {true_eattype} | Predicted: {pred_eattype}",
-            "True FOOD / Predicted FOOD": f"True: {true_food} | Predicted: {pred_food}",
-            "True PRICERANGE / Predicted PRICERANGE": f"True: {true_pricerange} | Predicted: {pred_pricerange}",
-            "True RATING / Predicted RATING": f"True: {true_rating} | Predicted: {pred_rating}",
-            "True AREA / Predicted AREA": f"True: {true_area} | Predicted: {pred_area}",
-            "True NEAR / Predicted NEAR": f"True: {true_near} | Predicted: {pred_near}",
+            "True BIRTHDATE / Predicted BIRTHDATE": f"True: {true_birthdate} | Predicted: {pred_birthdate}",
+            "True DEATHDATE / Predicted DEATHDATE": f"True: {true_deathdate} | Predicted: {pred_deathdate}",
+            "True OCCUPATION / Predicted OCCUPATION": f"True: {true_occupation} | Predicted: {pred_occupation}",
             "Token Evaluation": token_eval
         }
         rows.append(row)
@@ -222,7 +211,8 @@ def save_confusion_matrix_images(test_input_ids, test_label_ids, predictions, at
             if att == 1 and tok not in {"[CLS]", "[SEP]", "[PAD]"}:
                 all_true.append(map_bio_to_entity(t))
                 all_pred.append(map_bio_to_entity(p))
-    classes = ["O", "NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
+    classes = ["NAME", "BIRTHDATE", "DEATHDATE", "OCCUPATION"]
+
     cm = confusion_matrix(all_true, all_pred, labels=classes)
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
