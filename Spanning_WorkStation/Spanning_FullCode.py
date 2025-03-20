@@ -7,25 +7,23 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoConfig, BertModel, TrainingArguments
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # 환경변수 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# 개체 필드 정의
 entity_fields = {
     "NAME": "name",
-    "EATTYPE": "eatType",
-    "FOOD": "food",
-    "PRICERANGE": "priceRange",
-    "RATING": "customer rating",
-    "AREA": "area",
-    "NEAR": "near"
+    "BIRTH_DATE": "birth_date",
+    "DEATH_DATE": "death_date",
+    "OCCUPATION": "occupation",
 }
 
-# 라벨 목록 및 id 변환
-label_list = ["O"] + list(entity_fields.keys())  # O: non-entity
+# 라벨 목록 및 id 변환 (O 포함)
+label_list = ["O"] + list(entity_fields.keys())  # ["O", "NAME", "BIRTH_DATE", "DEATH_DATE", "OCCUPATION"]
 label2id = {label: idx for idx, label in enumerate(label_list)}
 id2label = {v: k for k, v in label2id.items()}
 
@@ -52,7 +50,7 @@ def create_span_labels_with_offsets(text, record, offsets):
             if match:
                 char_start, char_end = match.span()
                 token_start, token_end = None, None
-                # 오프셋(각 토큰의 [start, end] 문자 위치)에서 해당 토큰 인덱스 찾기
+                # 오프셋에서 해당 토큰 인덱스 찾기
                 for i, (s, e) in enumerate(offsets):
                     if s <= char_start < e:
                         token_start = i
@@ -67,7 +65,7 @@ def create_span_labels_with_offsets(text, record, offsets):
 def generate_candidate_spans(offsets, max_span_length=10):
     """
     주어진 토큰 오프셋을 바탕으로 가능한 후보 span (시작, 끝) 쌍을 생성.
-    (끝 인덱스는 포함하는 형태)
+    (끝 인덱스 포함)
     """
     n = len(offsets)
     candidates = []
@@ -98,12 +96,13 @@ class SpanNERDataset(Dataset):
         self.data = data_list
         self.max_length = max_length
         self.max_span_length = max_span_length
-        self.samples = []  # 각 샘플: 토큰화된 입력, 어텐션 마스크, 후보 span, span 라벨(정답)
+        self.samples = []  # 각 샘플: 토큰화된 입력, 어텐션 마스크, 후보 span, span 정답 라벨
         self.prepare_data()
 
     def prepare_data(self):
         for record in self.data:
-            text = record.get("B열문장", "")
+            # 원문 텍스트는 "doc" 컬럼 사용
+            text = str(record.get("doc", ""))
             encoding = self.tokenizer(
                 text,
                 return_tensors="pt",
@@ -180,19 +179,12 @@ class SpanNERModel(nn.Module):
         return batch_logits
 
 
-import numpy as np
-import pandas as pd
-import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix, f1_score
+# --- Evaluation 및 Helper 함수 ---
 
-
-# helper: candidate span을 토큰 리스트를 바탕으로 문자열로 변환 (BERT의 WordPiece 토큰 처리)
 def span_to_text(tokens, span):
     """
     tokens: tokenizer.convert_ids_to_tokens() 결과 리스트
-    span: (start, end) 튜플 (end 인덱스 포함)
+    span: (start, end) 튜플 (끝 인덱스 포함)
     """
     span_tokens = tokens[span[0]:span[1] + 1]
     text = ""
@@ -210,10 +202,6 @@ def span_to_text(tokens, span):
 def compute_span_metrics(preds, dataset, id2label, label_list):
     """
     전체 후보 span 단위의 예측 결과에 대해, "O" 라벨을 제외한 개체 라벨에 대한 macro F1 score 계산
-    preds: 각 샘플별 후보 span에 대한 로짓 리스트 (torch.Tensor)
-    dataset: SpanNERDataset 인스턴스 (각 샘플에 candidate_spans와 정답 span_label_ids가 있음)
-    id2label: int -> label 문자열 매핑 (예, {0: "O", 1: "NAME", ...})
-    label_list: 전체 라벨 목록, 예: ["O", "NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
     """
     all_true = []
     all_pred = []
@@ -225,7 +213,7 @@ def compute_span_metrics(preds, dataset, id2label, label_list):
         all_pred.extend(pred_ids)
     true_labels = [id2label[t] for t in all_true]
     pred_labels = [id2label[p] for p in all_pred]
-    # O 라벨을 제외하고 평가 (macro)
+    # "O" 라벨을 제외하고 평가 (macro)
     eval_labels = label_list[1:]
     f1 = f1_score(true_labels, pred_labels, labels=eval_labels, average="macro")
     return {"f1": f1}
@@ -234,10 +222,6 @@ def compute_span_metrics(preds, dataset, id2label, label_list):
 def compute_macro_metrics_per_document_span(dataset, predictions, id2label, label_list):
     """
     각 문서(샘플)별 후보 span 단위의 예측 결과를 모아, 각 라벨별 Macro Precision, Recall, F1 계산
-    dataset: SpanNERDataset 인스턴스
-    predictions: 각 샘플별 후보 span 로짓 (리스트, 각 요소는 torch.Tensor)
-    id2label: int -> label 문자열 매핑
-    label_list: 전체 라벨 목록 (예: ["O", "NAME", ...])
     """
     metrics_per_entity = {label: {"precisions": [], "recalls": [], "f1s": []} for label in label_list}
     for i, sample in enumerate(dataset.samples):
@@ -266,23 +250,18 @@ def compute_macro_metrics_per_document_span(dataset, predictions, id2label, labe
         rec_avg = np.mean(metrics_per_entity[entity]["recalls"])
         f1_avg = np.mean(metrics_per_entity[entity]["f1s"])
         macro_metrics[entity] = {"precision": prec_avg, "recall": rec_avg, "f1": f1_avg}
-        print(
-            f"Entity: {entity} - Macro Precision: {prec_avg:.4f}, Macro Recall: {rec_avg:.4f}, Macro F1: {f1_avg:.4f}")
+        print(f"Entity: {entity} - Macro Precision: {prec_avg:.4f}, Macro Recall: {rec_avg:.4f}, Macro F1: {f1_avg:.4f}")
     return macro_metrics
 
 
 def exact_matching_accuracy_per_document_span(test_data, dataset, predictions, tokenizer, id2label):
     """
-    문서 단위 정확도 계산: 각 문서에서 각 개체 필드(예: NAME 등)에 대해,
-    후보 span 중 predicted label이 해당 개체인 것 중, 실제 토큰 텍스트(변환 후)가 ground truth와 정확히 일치하면 정답으로 간주.
-
-    test_data: 원본 레코드 리스트 (CSV 파일에서 읽은 dict 리스트)
-    dataset: SpanNERDataset 인스턴스 (test_data와 인덱스가 동일하다고 가정)
-    predictions: 각 문서별 후보 span 로짓 (리스트, 각 요소는 torch.Tensor)
-    tokenizer: 모델에 사용된 tokenizer
-    id2label: int -> label 문자열 매핑
+    문서 단위 정확도 계산:
+    각 문서에서 각 개체 필드(여기서는 "NAME", "BIRTH_DATE", "DEATH_DATE", "OCCUPATION")에 대해,
+    후보 span 중 predicted label이 해당 개체인 것 중, 실제 토큰 텍스트(후처리 후)가 ground truth와 정확히 일치하면 정답으로 간주.
     """
-    entity_types = ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
+    entity_types = list(entity_fields.keys())  # ["NAME", "BIRTH_DATE", "DEATH_DATE", "OCCUPATION"]
+    fields = [entity_fields[e] for e in entity_types]  # ["name", "birth_date", "death_date", "occupation"]
     overall_metrics = {entity: {"correct": 0, "total": len(test_data), "accuracy": 0.0} for entity in entity_types}
 
     for idx, record in enumerate(test_data):
@@ -291,8 +270,7 @@ def exact_matching_accuracy_per_document_span(test_data, dataset, predictions, t
         candidate_spans = dataset.samples[idx]['candidate_spans']
         logits = predictions[idx]
         pred_ids = torch.argmax(logits, dim=-1).tolist()
-        for entity, field in zip(entity_types,
-                                 ["name", "eatType", "food", "priceRange", "customer rating", "area", "near"]):
+        for entity, field in zip(entity_types, fields):
             true_entity = get_str(record, field).strip()
             found = False
             for span, pred_label_id in zip(candidate_spans, pred_ids):
@@ -313,10 +291,7 @@ def exact_matching_accuracy_per_document_span(test_data, dataset, predictions, t
 
 def print_text_and_entity_predictions_span(test_data, dataset, predictions, tokenizer, id2label):
     """
-    각 문서별로 원문, 각 개체 필드의 ground truth와 predicted span(텍스트)을 출력합니다.
-    test_data: 원본 레코드 리스트
-    dataset: SpanNERDataset 인스턴스
-    predictions: 각 문서별 후보 span 로짓 (리스트, 각 요소는 torch.Tensor)
+    각 문서별로 원문(doc 컬럼), 각 개체 필드의 ground truth와 predicted span(텍스트)을 출력합니다.
     """
     print("Document-wise Entity Prediction Results (Span-based):")
     for idx, record in enumerate(test_data):
@@ -325,24 +300,22 @@ def print_text_and_entity_predictions_span(test_data, dataset, predictions, toke
         candidate_spans = dataset.samples[idx]['candidate_spans']
         logits = predictions[idx]
         pred_ids = torch.argmax(logits, dim=-1).tolist()
-        # 각 entity에 대해 첫 번째로 예측된 candidate span의 텍스트를 선택
-        pred_entities = {entity: None for entity in ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]}
+        # 각 entity에 대해 첫 번째로 예측된 candidate span의 텍스트 선택
+        pred_entities = {entity: None for entity in entity_fields.keys()}
         for span, pred_label_id in zip(candidate_spans, pred_ids):
             pred_label = id2label[pred_label_id]
             if pred_label != "O" and pred_label in pred_entities and pred_entities[pred_label] is None:
                 pred_entities[pred_label] = span_to_text(tokens, span).strip()
         true_entities = {
             "NAME": get_str(record, "name").strip(),
-            "EATTYPE": get_str(record, "eatType").strip(),
-            "FOOD": get_str(record, "food").strip(),
-            "PRICERANGE": get_str(record, "priceRange").strip(),
-            "RATING": get_str(record, "customer rating").strip(),
-            "AREA": get_str(record, "area").strip(),
-            "NEAR": get_str(record, "near").strip()
+            "BIRTH_DATE": get_str(record, "birth_date").strip(),
+            "DEATH_DATE": get_str(record, "death_date").strip(),
+            "OCCUPATION": get_str(record, "occupation").strip()
         }
-        text = get_str(record, "B열문장")
+        # 원문 텍스트는 "doc" 컬럼 사용
+        text = get_str(record, "doc")
         print(f"Text: {text}")
-        for tag in ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]:
+        for tag in entity_fields.keys():
             true_val = true_entities[tag] if true_entities[tag] else None
             pred_val = pred_entities[tag] if pred_entities[tag] else None
             print(f"True {tag}: {true_val} | Predicted {tag}: {pred_val}")
@@ -370,37 +343,30 @@ def save_all_evaluation_excel_span(test_data, dataset, predictions, tokenizer, i
             span_info.append(f"{span_text} ({label})")
         span_info_str = "\n".join(span_info)
         true_name = get_str(record, "name")
-        true_eattype = get_str(record, "eatType")
-        true_food = get_str(record, "food")
-        true_pricerange = get_str(record, "priceRange")
-        true_rating = get_str(record, "customer rating")
-        true_area = get_str(record, "area")
-        true_near = get_str(record, "near")
+        true_birth_date = get_str(record, "birth_date")
+        true_death_date = get_str(record, "death_date")
+        true_occupation = get_str(record, "occupation")
 
         # 각 entity별 예측: 첫 번째로 해당 entity로 예측된 candidate span의 텍스트 사용
-        pred_entities = {entity: "" for entity in ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]}
+        pred_entities = {entity: "" for entity in entity_fields.keys()}
         for span, p_id in zip(candidate_spans, pred_ids):
             pred_label = id2label[p_id]
             if pred_label in pred_entities and not pred_entities[pred_label]:
                 pred_entities[pred_label] = span_to_text(tokens, span)
 
         row = {
-            "Text": get_str(record, "질문수정"),
+            "Text": get_str(record, "doc"),
             "Span Info": span_info_str,
             "True NAME / Predicted NAME": f"True: {true_name} | Predicted: {pred_entities['NAME']}",
-            "True EATTYPE / Predicted EATTYPE": f"True: {true_eattype} | Predicted: {pred_entities['EATTYPE']}",
-            "True FOOD / Predicted FOOD": f"True: {true_food} | Predicted: {pred_entities['FOOD']}",
-            "True PRICERANGE / Predicted PRICERANGE": f"True: {true_pricerange} | Predicted: {pred_entities['PRICERANGE']}",
-            "True RATING / Predicted RATING": f"True: {true_rating} | Predicted: {pred_entities['RATING']}",
-            "True AREA / Predicted AREA": f"True: {true_area} | Predicted: {pred_entities['AREA']}",
-            "True NEAR / Predicted NEAR": f"True: {true_near} | Predicted: {pred_entities['NEAR']}"
+            "True BIRTH_DATE / Predicted BIRTH_DATE": f"True: {true_birth_date} | Predicted: {pred_entities['BIRTH_DATE']}",
+            "True DEATH_DATE / Predicted DEATH_DATE": f"True: {true_death_date} | Predicted: {pred_entities['DEATH_DATE']}",
+            "True OCCUPATION / Predicted OCCUPATION": f"True: {true_occupation} | Predicted: {pred_entities['OCCUPATION']}"
         }
         rows.append(row)
     record_df = pd.DataFrame(rows)
     overall_list = []
     if overall_metrics is None:
-        overall_metrics = exact_matching_accuracy_per_document_span(test_data, dataset, predictions, tokenizer,
-                                                                    id2label)
+        overall_metrics = exact_matching_accuracy_per_document_span(test_data, dataset, predictions, tokenizer, id2label)
     for entity, metrics in overall_metrics.items():
         overall_list.append({
             "Entity": entity,
@@ -463,7 +429,7 @@ if __name__ == "__main__":
     model_name = "bert-base-multilingual-cased"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Span-based Dataset 생성
+    # Span-based Dataset 생성 (원문은 "doc" 컬럼 사용)
     train_dataset = SpanNERDataset(train_data, tokenizer)
     test_dataset = SpanNERDataset(test_data, tokenizer)
 
@@ -481,8 +447,7 @@ if __name__ == "__main__":
         evaluation_strategy="epoch"
     )
 
-
-    # collate 함수: 리스트 형태의 candidate_spans를 그대로 배치에 포함시키기 위해 커스터마이징
+    # collate 함수: candidate_spans 리스트를 그대로 배치에 포함시키기 위해 커스터마이징
     def collate_fn(batch):
         input_ids = torch.stack([item["input_ids"] for item in batch])
         attention_mask = torch.stack([item["attention_mask"] for item in batch])
@@ -496,9 +461,7 @@ if __name__ == "__main__":
         }
 
 
-    # Trainer에 맞추어 compute_loss를 재정의한 커스텀 Trainer 클래스
     from transformers import Trainer
-
 
     class SpanNERTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -514,7 +477,6 @@ if __name__ == "__main__":
             )
             return (loss, logits) if return_outputs else loss
 
-
     trainer = SpanNERTrainer(
         model=model,
         args=training_args,
@@ -528,7 +490,7 @@ if __name__ == "__main__":
     trainer.train()
     print("Training completed.")
 
-    # 평가 및 예측 (DataLoader를 활용)
+    # 평가 및 예측 (DataLoader 활용)
     model.eval()
     predictions = []
     loader = DataLoader(test_dataset, batch_size=8, collate_fn=collate_fn)
@@ -540,7 +502,6 @@ if __name__ == "__main__":
                 candidate_spans=batch["candidate_spans"]
             )
             predictions.extend(logits)
-
 
     metrics = compute_span_metrics(predictions, test_dataset, id2label, label_list)
     macro_metrics = compute_macro_metrics_per_document_span(test_dataset, predictions, id2label, label_list)

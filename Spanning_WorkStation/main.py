@@ -30,8 +30,5 @@ with open(test_output_file, "w", encoding="utf-8") as f:
     for spans in test_spans:
         f.write(json.dumps(spans, ensure_ascii=False) + "\n")
 print("Test spanning results saved:", test_output_file)
-# 평가 함수 호출 시 반드시 두 개의 인자를 전달해야 합니다.
-span_metrics = compute_span_metrics(test_data, test_spans)
-exact_match_metrics = exact_matching_accuracy_span(test_data, test_spans)
-print_text_and_entity_predictions_span(test_data, test_spans)
+
 
