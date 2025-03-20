@@ -13,7 +13,6 @@ from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-
 def get_str(record, field):
     val = record.get(field)
     if pd.isnull(val):
@@ -21,13 +20,11 @@ def get_str(record, field):
     else:
         return str(val).strip()
 
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# 수정된 label2id (E2E 데이터에 맞게; familyFriendly 관련 라벨 제거)
 label2id = {
     "O": 0,
     "B-NAME": 1, "I-NAME": 2,
@@ -40,19 +37,8 @@ label2id = {
 }
 id2label = {v: k for k, v in label2id.items()}
 
-
 def create_bio_labels_with_offsets(text, tokens, offsets, record):
-    """
-    text   : 원본 문장 (예: 질문수정 컬럼)
-    tokens : 토크나이저로 분할된 토큰 리스트
-    offsets: 각 토큰의 (start, end) 오프셋 정보
-    record : 현재 데이터 레코드 (예: {"name": "...", "eatType": "...", ...})
-
-    반환값: tokens와 길이가 같은 BIO 라벨 리스트
-    """
     labels = ["O"] * len(tokens)
-
-    # CSV 컬럼 -> BIO 태그 이름 매핑 (familyFriendly 관련 항목 제거)
     entity_fields = {
         "NAME": "name",
         "EATTYPE": "eatType",
@@ -62,35 +48,28 @@ def create_bio_labels_with_offsets(text, tokens, offsets, record):
         "AREA": "area",
         "NEAR": "near"
     }
-
     for tag, field in entity_fields.items():
         try:
             entity_value = str(record.get(field)).strip() if record.get(field) is not None else ""
         except Exception:
             entity_value = ""
-        # 엔티티 값이 존재하면 원본 텍스트 내에서 찾음
         if entity_value:
-            # 특수 기호(예: "£")를 그대로 유지하면서 re.escape로 이스케이프 처리
             pattern = re.escape(entity_value)
             matches = re.finditer(pattern, text)
             for match in matches:
                 ent_start, ent_end = match.span()
                 b_assigned = False
                 for i, (token_start, token_end) in enumerate(offsets):
-                    # 오프셋 값이 [0,0]인 경우(예: 패딩)는 무시
                     if token_start == token_end == 0:
                         continue
-                    # ±1 마진을 두어 오프셋 불일치를 보완 (특수 기호 등)
-                    if token_end > ent_start and token_start < ent_end :
+                    if token_end > ent_start and token_start < ent_end:
                         if not b_assigned:
                             labels[i] = f"B-{tag}"
                             b_assigned = True
                         else:
                             labels[i] = f"I-{tag}"
-                # 첫번째 매칭만 사용 (여러 발생 시 추가 처리는 필요에 따라 수정)
                 break
     return labels
-
 
 def extract_entities(labels, tokens, tag):
     entities = []
@@ -102,7 +81,6 @@ def extract_entities(labels, tokens, tag):
                 entities.append("".join(current_entity_tokens))
             current_entity_tokens = [token_clean]
         elif label == f"I-{tag}" and current_entity_tokens:
-            # 서브워드인 경우 앞 토큰과 붙여서
             if token.startswith("##"):
                 current_entity_tokens.append(token_clean)
             else:
@@ -120,7 +98,6 @@ def extract_entities(labels, tokens, tag):
     if current_entity_tokens:
         entities.append("".join(current_entity_tokens))
     return " ".join(entities)
-
 
 def labeling(data_list):
     all_input_ids = []
@@ -149,7 +126,6 @@ def labeling(data_list):
         sentences_iob.append({"tokens": tokens, "labels": bio_labels})
     return all_input_ids, all_attention_masks, all_label_ids, sentences_iob
 
-
 class NERDataset(Dataset):
     def __init__(self, input_ids, attention_masks, label_ids):
         self.input_ids = input_ids
@@ -165,7 +141,6 @@ class NERDataset(Dataset):
             'attention_mask': torch.tensor(self.attention_masks[idx], dtype=torch.long),
             'labels': torch.tensor(self.label_ids[idx], dtype=torch.long)
         }
-
 
 def compute_metrics(p):
     predictions, labels = p
@@ -183,10 +158,7 @@ def compute_metrics(p):
     f1 = f1_score(true_labels, pred_labels)
     return {"f1": f1}
 
-
-def compute_macro_metrics_per_document(test_input_ids, test_label_ids, predictions, attention_masks, tokenizer,
-                                       id2label):
-    # 새 엔티티 종류 (O 외에 7개; FAMILY 제거)
+def compute_macro_metrics_per_document(test_input_ids, test_label_ids, predictions, attention_masks, tokenizer, id2label):
     entity_labels = ["O", "NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
     metrics_per_entity = {label: {"precisions": [], "recalls": [], "f1s": []} for label in entity_labels}
 
@@ -225,18 +197,14 @@ def compute_macro_metrics_per_document(test_input_ids, test_label_ids, predictio
             metrics_per_entity[entity]["f1s"].append(f1)
     macro_metrics = {}
     for entity in entity_labels:
-        prec_avg = np.mean(metrics_per_entity[entity]["precisions"]) if metrics_per_entity[entity][
-            "precisions"] else 0.0
+        prec_avg = np.mean(metrics_per_entity[entity]["precisions"]) if metrics_per_entity[entity]["precisions"] else 0.0
         rec_avg = np.mean(metrics_per_entity[entity]["recalls"]) if metrics_per_entity[entity]["recalls"] else 0.0
         f1_avg = np.mean(metrics_per_entity[entity]["f1s"]) if metrics_per_entity[entity]["f1s"] else 0.0
         macro_metrics[entity] = {"precision": prec_avg, "recall": rec_avg, "f1": f1_avg}
-        print(
-            f"Entity: {entity} - Macro Precision: {prec_avg:.4f}, Macro Recall: {rec_avg:.4f}, Macro F1: {f1_avg:.4f}")
+        print(f"Entity: {entity} - Macro Precision: {prec_avg:.4f}, Macro Recall: {rec_avg:.4f}, Macro F1: {f1_avg:.4f}")
     return macro_metrics
 
-
 def exact_matching_accuracy_per_document(test_data, test_input_ids, predictions, tokenizer, id2label):
-    # 엔티티 종류와 record 필드 이름 변경 (familyFriendly 제거)
     entity_types = ["NAME", "EATTYPE", "FOOD", "PRICERANGE", "RATING", "AREA", "NEAR"]
     overall_metrics = {}
     for entity in entity_types:
@@ -244,8 +212,7 @@ def exact_matching_accuracy_per_document(test_data, test_input_ids, predictions,
     for idx, record in enumerate(test_data):
         tokens = tokenizer.convert_ids_to_tokens(test_input_ids[idx])
         pred_labels = [id2label[p] for p in predictions[idx][:len(tokens)]]
-        for entity, field in zip(entity_types,
-                                 ["name", "eatType", "food", "priceRange", "customer rating", "area", "near"]):
+        for entity, field in zip(entity_types, ["name", "eatType", "food", "priceRange", "customer rating", "area", "near"]):
             true_entity = get_str(record, field)
             pred_entity = extract_entities(pred_labels, tokens, entity).strip()
             if true_entity == pred_entity:
@@ -255,7 +222,6 @@ def exact_matching_accuracy_per_document(test_data, test_input_ids, predictions,
         overall_metrics[entity]["accuracy"] = overall_metrics[entity]["correct"] / overall_metrics[entity]["total"]
         print(f"{entity} -> Accuracy: {overall_metrics[entity]['accuracy']:.4f}")
     return overall_metrics
-
 
 def print_text_and_entity_predictions(test_data, test_input_ids, predictions, tokenizer, id2label):
     print("Document-wise Entity Prediction Results:")
@@ -280,7 +246,6 @@ def print_text_and_entity_predictions(test_data, test_input_ids, predictions, to
             print(f"True {tag}: {true_val} | Predicted {tag}: {pred_val}")
         print("-" * 50)
 
-
 def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predictions, tokenizer, id2label,
                               filename="all_evaluation.xlsx", overall_metrics=None):
     rows = []
@@ -297,7 +262,6 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
                 continue
             bio_pairs.append(f"{tok}/{lab}")
         bio_str = "\n".join(bio_pairs)
-
         true_name = get_str(record, "name")
         true_eattype = get_str(record, "eatType")
         true_food = get_str(record, "food")
@@ -305,15 +269,14 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
         true_rating = get_str(record, "customer rating")
         true_area = get_str(record, "area")
         true_near = get_str(record, "near")
-
         pred_name = extract_entities(pred_token_labels, tokens, "NAME").strip()
+        pred_eattype = extract_entities(pred_token_tokens=pred_token_labels, tokens=tokens, tag="EATTYPE").strip() if "EATTYPE" in id2label.values() else extract_entities(pred_token_labels, tokens, "EATTYPE").strip()
         pred_eattype = extract_entities(pred_token_labels, tokens, "EATTYPE").strip()
         pred_food = extract_entities(pred_token_labels, tokens, "FOOD").strip()
         pred_pricerange = extract_entities(pred_token_labels, tokens, "PRICERANGE").strip()
         pred_rating = extract_entities(pred_token_labels, tokens, "RATING").strip()
         pred_area = extract_entities(pred_token_labels, tokens, "AREA").strip()
         pred_near = extract_entities(pred_token_labels, tokens, "NEAR").strip()
-
         if tokens[0] == "[CLS]" and tokens[-1] == "[SEP]":
             t_tokens = tokens[1:-1]
             t_true = true_token_labels[1:-1]
@@ -339,10 +302,8 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
         rows.append(row)
     record_df = pd.DataFrame(rows)
     overall_list = []
-
     if overall_metrics is None:
-        overall_metrics = exact_matching_accuracy_per_document(test_data, test_input_ids, predictions, tokenizer,
-                                                               id2label)
+        overall_metrics = exact_matching_accuracy_per_document(test_data, test_input_ids, predictions, tokenizer, id2label)
     for entity, metrics in overall_metrics.items():
         overall_list.append({
             "Entity": entity,
@@ -356,7 +317,6 @@ def save_all_evaluation_excel(test_data, test_input_ids, test_label_ids, predict
         overall_df.to_excel(writer, sheet_name="Overall Metrics", index=False)
     print("All evaluation results saved to", filename)
 
-
 def save_confusion_matrix_images(test_input_ids, test_label_ids, predictions, attention_masks, tokenizer, id2label,
                                  filename_base="token_confusion_matrix"):
     def map_bio_to_entity(label):
@@ -364,7 +324,6 @@ def save_confusion_matrix_images(test_input_ids, test_label_ids, predictions, at
             return "O"
         else:
             return label.split("-")[-1]
-
     all_true = []
     all_pred = []
     for i in range(len(test_input_ids)):
@@ -397,24 +356,15 @@ def save_confusion_matrix_images(test_input_ids, test_label_ids, predictions, at
     plt.close()
     print(f"Confusion matrix images saved to {filename_base}_count.png and {filename_base}_normalized.png")
 
-
 if __name__ == "__main__":
-    # Excel 파일에서 데이터 읽기 (파일 경로 및 시트명은 실제에 맞게 수정)
-    df_train = pd.read_csv(r"/home/jaehyun/E2E-clean/filename_updated.csv")
-    df_test = pd.read_csv(r"/home/jaehyun/E2E-clean/filename_updated_test.csv")
-
-    # 각 데이터프레임을 dict 리스트로 변환 (각 행이 하나의 record)
+    df_train = pd.read_csv(r"C:/junha/Datasets/E2E/filename_updated.csv")
+    df_test = pd.read_csv(r"C:/junha/Datasets/E2E/filename_updated_test.csv")
     train_data = df_train.to_dict(orient='records')
     test_data = df_test.to_dict(orient='records')
-
-    # 모델을 BERT 모델로 변경 (예: 다국어 BERT 사용)
     model_name = "bert-base-multilingual-cased"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-
     train_input_ids, train_attention_masks, train_label_ids, train_sentences_iob = labeling(train_data)
     test_input_ids, test_attention_masks, test_label_ids, test_sentences_iob = labeling(test_data)
-
-    # Train 데이터 라벨링 결과 저장
     train_output_file = "train_labeling_results.txt"
     with open(train_output_file, "w", encoding="utf-8") as f:
         for sent_dict in train_sentences_iob:
@@ -424,8 +374,6 @@ if __name__ == "__main__":
                 f.write(f"{token}\t{label}\n")
             f.write("\n")
     print(f"Train 라벨링 결과 저장 완료: {train_output_file}")
-
-    # Test 데이터 라벨링 결과 저장
     test_output_file = "test_labeling_results.txt"
     with open(test_output_file, "w", encoding="utf-8") as f:
         for sent_dict in test_sentences_iob:
@@ -435,10 +383,8 @@ if __name__ == "__main__":
                 f.write(f"{token}\t{label}\n")
             f.write("\n")
     print(f"Test 라벨링 결과 저장 완료: {test_output_file}")
-
     config = AutoConfig.from_pretrained(model_name, num_labels=len(label2id))
     model = BertForTokenClassification.from_pretrained(model_name, config=config)
-
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=1,
@@ -447,7 +393,6 @@ if __name__ == "__main__":
         weight_decay=0.03,
         logging_dir="./logs"
     )
-
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -455,14 +400,11 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         compute_metrics=compute_metrics
     )
-
     print("Training started...")
     trainer.train()
     print("Training completed.")
-
     preds, _, _ = trainer.predict(NERDataset(test_input_ids, test_attention_masks, test_label_ids))
     predictions = np.argmax(preds, axis=2)
-
     print_text_and_entity_predictions(
         test_data=test_data,
         test_input_ids=test_input_ids,
@@ -470,7 +412,6 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         id2label=id2label
     )
-
     macro_metrics = compute_macro_metrics_per_document(
         test_input_ids=test_input_ids,
         test_label_ids=test_label_ids,
@@ -479,7 +420,6 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         id2label=id2label
     )
-
     overall_metrics = exact_matching_accuracy_per_document(
         test_data=test_data,
         test_input_ids=test_input_ids,
@@ -487,7 +427,6 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         id2label=id2label
     )
-
     save_all_evaluation_excel(
         test_data=test_data,
         test_input_ids=test_input_ids,
@@ -498,7 +437,6 @@ if __name__ == "__main__":
         filename="all_evaluation.xlsx",
         overall_metrics=overall_metrics
     )
-
     save_confusion_matrix_images(
         test_input_ids=test_input_ids,
         test_label_ids=test_label_ids,
@@ -508,28 +446,22 @@ if __name__ == "__main__":
         id2label=id2label,
         filename_base="token_confusion_matrix"
     )
-
-    # 추가: 테스트 데이터의 실제 라벨과 예측 라벨을 각각 별도의 텍스트 파일로 저장
     test_true_file = "test_true_labels.txt"
     test_pred_file = "test_pred_labels.txt"
-
     with open(test_true_file, "w", encoding="utf-8") as f_true, \
-            open(test_pred_file, "w", encoding="utf-8") as f_pred:
+         open(test_pred_file, "w", encoding="utf-8") as f_pred:
         for i in range(len(test_data)):
             tokens_ids = test_input_ids[i]
             true_ids = test_label_ids[i]
             pred_ids = predictions[i]
-
             tokens = tokenizer.convert_ids_to_tokens(tokens_ids)
             true_labels = [id2label[t_id] for t_id in true_ids]
             pred_labels = [id2label[p_id] for p_id in pred_ids]
-
             for token, t_lab, p_lab in zip(tokens, true_labels, pred_labels):
                 if token not in ["[CLS]", "[SEP]", "[PAD]"]:
                     f_true.write(f"{token}\t{t_lab}\n")
                     f_pred.write(f"{token}\t{p_lab}\n")
             f_true.write("\n")
             f_pred.write("\n")
-
     print(f"실제 라벨 파일 저장 완료: {test_true_file}")
     print(f"예측 라벨 파일 저장 완료: {test_pred_file}")

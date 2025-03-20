@@ -5,7 +5,7 @@ from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from WorkStation.NER_Labeling import id2label, extract_entities
+from BIO_WorkStation.NER_Labeling import id2label, extract_entities
 
 
 def get_str(record, field):

@@ -9,8 +9,6 @@ label2id = {
     "B-BIRTHDATE": 3, "I-BIRTHDATE": 4,
     "B-DEATHDATE": 5, "I-DEATHDATE": 6,
     "B-OCCUPATION": 7, "I-OCCUPATION": 8,
-
-
 }
 id2label = {v: k for k, v in label2id.items()}
 
